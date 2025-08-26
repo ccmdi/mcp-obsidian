@@ -1,4 +1,5 @@
->[!NOTE] This is a small modification of [this plugin](https://github.com/MarkusPfundstein/mcp-obsidian), which removes write access and adds a reading whitelist, so you can choose what to share as context.
+>[!NOTE] 
+> This is a small modification of [this plugin](https://github.com/MarkusPfundstein/mcp-obsidian), which removes write access and adds a reading whitelist, so you can choose what to share as context.
 
 # MCP server for Obsidian
 
