@@ -1,19 +1,26 @@
 import requests
 import urllib.parse
 import os
-from typing import Any
+import fnmatch
+from typing import Any, List, Optional
+import urllib3
+
+# Disable SSL warnings for self-signed certificates
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 class Obsidian():
     def __init__(
             self, 
             api_key: str,
-            protocol: str = os.getenv('OBSIDIAN_PROTOCOL', 'https').lower(),
-            host: str = str(os.getenv('OBSIDIAN_HOST', '127.0.0.1')),
+            protocol: str = os.getenv('OBSIDIAN_PROTOCOL', 'https'),
+            host: str = os.getenv('OBSIDIAN_HOST', '127.0.0.1'),
             port: int = int(os.getenv('OBSIDIAN_PORT', '27124')),
             verify_ssl: bool = False,
+            whitelist: Optional[List[str]] = None,
         ):
         self.api_key = api_key
         
+        protocol = protocol.lower()
         if protocol == 'http':
             self.protocol = 'http'
         else:
@@ -22,7 +29,20 @@ class Obsidian():
         self.host = host
         self.port = port
         self.verify_ssl = verify_ssl
-        self.timeout = (3, 6)
+        self.timeout = (10, 30)  # Increased timeout for initial connections
+        
+        # Initialize whitelist - if None, load from environment
+        if whitelist is None:
+            whitelist_env = os.getenv('OBSIDIAN_WHITELIST', '')
+            if whitelist_env:
+                self.whitelist = [path.strip() for path in whitelist_env.split(',') if path.strip()]
+            else:
+                self.whitelist = []
+        else:
+            self.whitelist = whitelist
+        
+        # If whitelist is empty, allow all paths (backward compatibility)
+        self.whitelist_enabled = len(self.whitelist) > 0
 
     def get_base_url(self) -> str:
         return f'{self.protocol}://{self.host}:{self.port}'
@@ -51,23 +71,38 @@ class Obsidian():
             response = requests.get(url, headers=self._get_headers(), verify=self.verify_ssl, timeout=self.timeout)
             response.raise_for_status()
             
-            return response.json()['files']
+            files = response.json()['files']
+            # Filter files based on whitelist
+            return self._filter_files_by_whitelist(files)
 
         return self._safe_call(call_fn)
 
         
     def list_files_in_dir(self, dirpath: str) -> Any:
+        # Validate directory access
+        self._validate_path_access(dirpath)
+        
         url = f"{self.get_base_url()}/vault/{dirpath}/"
         
         def call_fn():
             response = requests.get(url, headers=self._get_headers(), verify=self.verify_ssl, timeout=self.timeout)
             response.raise_for_status()
             
-            return response.json()['files']
+            files = response.json()['files']
+            # Filter files based on whitelist (prepend dirpath to each file for checking)
+            filtered_files = []
+            for file in files:
+                full_path = f"{dirpath}/{file}" if dirpath else file
+                if self._is_path_allowed(full_path):
+                    filtered_files.append(file)
+            return filtered_files
 
         return self._safe_call(call_fn)
 
     def get_file_contents(self, filepath: str) -> Any:
+        # Validate file access
+        self._validate_path_access(filepath)
+        
         url = f"{self.get_base_url()}/vault/{filepath}"
     
         def call_fn():
@@ -87,15 +122,40 @@ class Obsidian():
         Returns:
             String containing all file contents with headers
         """
+        import time
+        
         result = []
         
-        for filepath in filepaths:
-            try:
-                content = self.get_file_contents(filepath)
-                result.append(f"# {filepath}\n\n{content}\n\n---\n\n")
-            except Exception as e:
-                # Add error message but continue processing other files
-                result.append(f"# {filepath}\n\nError reading file: {str(e)}\n\n---\n\n")
+        # Use a session for connection reuse
+        with requests.Session() as session:
+            session.headers.update(self._get_headers())
+            session.verify = self.verify_ssl
+            
+            for i, filepath in enumerate(filepaths):
+                try:
+                    # Validate file access before attempting to read
+                    self._validate_path_access(filepath)
+                    
+                    # Add small delay between requests (except for first one)
+                    if i > 0:
+                        time.sleep(0.1)  # 100ms delay
+                    
+                    # Make HTTP request using session
+                    url = f"{self.get_base_url()}/vault/{filepath}"
+                    
+                    def call_fn():
+                        response = session.get(url, timeout=self.timeout)
+                        response.raise_for_status()
+                        return response.text
+                    
+                    content = self._safe_call(call_fn)
+                    result.append(f"# {filepath}\n\n{content}\n\n---\n\n")
+                except PermissionError as e:
+                    # Add permission error message but continue processing other files
+                    result.append(f"# {filepath}\n\n{str(e)}\n\n---\n\n")
+                except Exception as e:
+                    # Add error message but continue processing other files
+                    result.append(f"# {filepath}\n\nError reading file: {str(e)}\n\n---\n\n")
                 
         return "".join(result)
 
@@ -109,75 +169,19 @@ class Obsidian():
         def call_fn():
             response = requests.post(url, headers=self._get_headers(), params=params, verify=self.verify_ssl, timeout=self.timeout)
             response.raise_for_status()
-            return response.json()
-
-        return self._safe_call(call_fn)
-    
-    def append_content(self, filepath: str, content: str) -> Any:
-        url = f"{self.get_base_url()}/vault/{filepath}"
-        
-        def call_fn():
-            response = requests.post(
-                url, 
-                headers=self._get_headers() | {'Content-Type': 'text/markdown'}, 
-                data=content,
-                verify=self.verify_ssl,
-                timeout=self.timeout
-            )
-            response.raise_for_status()
-            return None
-
-        return self._safe_call(call_fn)
-    
-    def patch_content(self, filepath: str, operation: str, target_type: str, target: str, content: str) -> Any:
-        url = f"{self.get_base_url()}/vault/{filepath}"
-        
-        headers = self._get_headers() | {
-            'Content-Type': 'text/markdown',
-            'Operation': operation,
-            'Target-Type': target_type,
-            'Target': urllib.parse.quote(target)
-        }
-        
-        def call_fn():
-            response = requests.patch(url, headers=headers, data=content, verify=self.verify_ssl, timeout=self.timeout)
-            response.raise_for_status()
-            return None
-
-        return self._safe_call(call_fn)
-
-    def put_content(self, filepath: str, content: str) -> Any:
-        url = f"{self.get_base_url()}/vault/{filepath}"
-        
-        def call_fn():
-            response = requests.put(
-                url, 
-                headers=self._get_headers() | {'Content-Type': 'text/markdown'}, 
-                data=content,
-                verify=self.verify_ssl,
-                timeout=self.timeout
-            )
-            response.raise_for_status()
-            return None
-
-        return self._safe_call(call_fn)
-    
-    def delete_file(self, filepath: str) -> Any:
-        """Delete a file or directory from the vault.
-        
-        Args:
-            filepath: Path to the file to delete (relative to vault root)
+            results = response.json()
             
-        Returns:
-            None on success
-        """
-        url = f"{self.get_base_url()}/vault/{filepath}"
-        
-        def call_fn():
-            response = requests.delete(url, headers=self._get_headers(), verify=self.verify_ssl, timeout=self.timeout)
-            response.raise_for_status()
-            return None
+            # Filter results based on whitelist
+            if self.whitelist_enabled:
+                filtered_results = []
+                for result in results:
+                    filename = result.get('filename', '')
+                    if self._is_path_allowed(filename):
+                        filtered_results.append(result)
+                return filtered_results
             
+            return results
+
         return self._safe_call(call_fn)
     
     def search_json(self, query: dict) -> Any:
@@ -190,7 +194,19 @@ class Obsidian():
         def call_fn():
             response = requests.post(url, headers=headers, json=query, verify=self.verify_ssl, timeout=self.timeout)
             response.raise_for_status()
-            return response.json()
+            results = response.json()
+            
+            # Filter results based on whitelist
+            if self.whitelist_enabled:
+                filtered_results = []
+                for result in results:
+                    # The result structure might vary, but typically has a 'path' field
+                    path = result.get('path', result.get('filename', ''))
+                    if self._is_path_allowed(path):
+                        filtered_results.append(result)
+                return filtered_results
+            
+            return results
 
         return self._safe_call(call_fn)
     
@@ -289,3 +305,104 @@ class Obsidian():
             return response.json()
 
         return self._safe_call(call_fn)
+
+    def get_all_tags(self) -> Any:
+        """Get all unique tags used in the vault.
+        
+        Returns:
+            List of unique tags used across all notes in the vault
+        """
+        # Build the Dataview DQL query
+        dql_query = """TABLE file.tags
+WHERE file.tags"""
+        
+        # Make the request to search endpoint
+        url = f"{self.get_base_url()}/search/"
+        headers = self._get_headers() | {
+            'Content-Type': 'application/vnd.olrapi.dataview.dql+txt'
+        }
+        
+        def call_fn():
+            response = requests.post(
+                url,
+                headers=headers,
+                data=dql_query.encode('utf-8'),
+                verify=self.verify_ssl,
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            results = response.json()
+            
+            # Extract and flatten tags from the Dataview results
+            all_tags = set()
+            for result in results:
+                file_tags = result.get('result', {}).get('file.tags')
+                if file_tags and isinstance(file_tags, list):
+                    for tag in file_tags:
+                        if tag:  # Skip empty tags
+                            all_tags.add(tag)
+            
+            # Convert to sorted list for consistent output
+            return sorted(list(all_tags))
+
+        return self._safe_call(call_fn)
+
+    def _is_path_allowed(self, path: str) -> bool:
+        """Check if a path is allowed based on the whitelist configuration.
+        
+        Args:
+            path: The file or directory path to check
+            
+        Returns:
+            True if the path is allowed, False otherwise
+        """
+        if not self.whitelist_enabled:
+            return True
+        
+        # Normalize the path (remove leading/trailing slashes)
+        normalized_path = path.strip('/')
+        
+        # Check against each whitelist pattern
+        for pattern in self.whitelist:
+            # Normalize the pattern
+            normalized_pattern = pattern.strip('/')
+            
+            # Check if the path matches the pattern exactly
+            if normalized_path == normalized_pattern:
+                return True
+            
+            # Check if the path starts with the pattern (for directory matching)
+            if normalized_path.startswith(normalized_pattern + '/'):
+                return True
+            
+            # Check if the pattern matches using glob-style matching
+            if fnmatch.fnmatch(normalized_path, normalized_pattern):
+                return True
+        
+        return False
+    
+    def _validate_path_access(self, path: str) -> None:
+        """Validate that a path is allowed according to the whitelist.
+        
+        Args:
+            path: The file or directory path to validate
+            
+        Raises:
+            PermissionError: If the path is not allowed by the whitelist
+        """
+        if not self._is_path_allowed(path):
+            raise PermissionError(f"Access denied: Path '{path}' is not in the whitelist")
+    
+    def _filter_files_by_whitelist(self, files: List[str]) -> List[str]:
+        """Filter a list of files based on the whitelist configuration.
+        
+        Args:
+            files: List of file paths to filter
+            
+        Returns:
+            Filtered list of files that are allowed by the whitelist
+        """
+        if not self.whitelist_enabled:
+            return files
+        
+        return [file for file in files if self._is_path_allowed(file)]

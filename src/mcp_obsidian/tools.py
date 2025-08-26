@@ -12,6 +12,10 @@ from . import obsidian
 api_key = os.getenv("OBSIDIAN_API_KEY", "")
 obsidian_host = os.getenv("OBSIDIAN_HOST", "127.0.0.1")
 
+# Load whitelist configuration from environment
+whitelist_env = os.getenv("OBSIDIAN_WHITELIST", "")
+whitelist = [path.strip() for path in whitelist_env.split(',') if path.strip()] if whitelist_env else []
+
 if api_key == "":
     raise ValueError(f"OBSIDIAN_API_KEY environment variable required. Working directory: {os.getcwd()}")
 
@@ -35,7 +39,7 @@ class ListFilesInVaultToolHandler(ToolHandler):
     def get_tool_description(self):
         return Tool(
             name=self.name,
-            description="Lists all files and directories in the root directory of your Obsidian vault.",
+            description="Lists all files and directories in the root directory of your Obsidian vault. If you have not used any Obsidian tools yet, this is the first tool you should often use.",
             inputSchema={
                 "type": "object",
                 "properties": {},
@@ -44,7 +48,7 @@ class ListFilesInVaultToolHandler(ToolHandler):
         )
 
     def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
-        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
+        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host, whitelist=whitelist)
 
         files = api.list_files_in_vault()
 
@@ -80,7 +84,7 @@ class ListFilesInDirToolHandler(ToolHandler):
         if "dirpath" not in args:
             raise RuntimeError("dirpath argument missing in arguments")
 
-        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
+        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host, whitelist=whitelist)
 
         files = api.list_files_in_dir(args["dirpath"])
 
@@ -98,7 +102,7 @@ class GetFileContentsToolHandler(ToolHandler):
     def get_tool_description(self):
         return Tool(
             name=self.name,
-            description="Return the content of a single file in your vault.",
+            description="Return the content of a single file in your vault. This tool should be used often to retrieve full context for a user's question.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -116,7 +120,7 @@ class GetFileContentsToolHandler(ToolHandler):
         if "filepath" not in args:
             raise RuntimeError("filepath argument missing in arguments")
 
-        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
+        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host, whitelist=whitelist)
 
         content = api.get_file_contents(args["filepath"])
 
@@ -159,7 +163,7 @@ class SearchToolHandler(ToolHandler):
 
         context_length = args.get("context_length", 100)
         
-        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
+        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host, whitelist=whitelist)
         results = api.search(args["query"], context_length)
         
         formatted_results = []
@@ -188,187 +192,6 @@ class SearchToolHandler(ToolHandler):
                 text=json.dumps(formatted_results, indent=2)
             )
         ]
-    
-class AppendContentToolHandler(ToolHandler):
-   def __init__(self):
-       super().__init__("obsidian_append_content")
-
-   def get_tool_description(self):
-       return Tool(
-           name=self.name,
-           description="Append content to a new or existing file in the vault.",
-           inputSchema={
-               "type": "object",
-               "properties": {
-                   "filepath": {
-                       "type": "string",
-                       "description": "Path to the file (relative to vault root)",
-                       "format": "path"
-                   },
-                   "content": {
-                       "type": "string",
-                       "description": "Content to append to the file"
-                   }
-               },
-               "required": ["filepath", "content"]
-           }
-       )
-
-   def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
-       if "filepath" not in args or "content" not in args:
-           raise RuntimeError("filepath and content arguments required")
-
-       api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
-       api.append_content(args.get("filepath", ""), args["content"])
-
-       return [
-           TextContent(
-               type="text",
-               text=f"Successfully appended content to {args['filepath']}"
-           )
-       ]
-   
-class PatchContentToolHandler(ToolHandler):
-   def __init__(self):
-       super().__init__("obsidian_patch_content")
-
-   def get_tool_description(self):
-       return Tool(
-           name=self.name,
-           description="Insert content into an existing note relative to a heading, block reference, or frontmatter field.",
-           inputSchema={
-               "type": "object",
-               "properties": {
-                   "filepath": {
-                       "type": "string",
-                       "description": "Path to the file (relative to vault root)",
-                       "format": "path"
-                   },
-                   "operation": {
-                       "type": "string",
-                       "description": "Operation to perform (append, prepend, or replace)",
-                       "enum": ["append", "prepend", "replace"]
-                   },
-                   "target_type": {
-                       "type": "string",
-                       "description": "Type of target to patch",
-                       "enum": ["heading", "block", "frontmatter"]
-                   },
-                   "target": {
-                       "type": "string", 
-                       "description": "Target identifier (heading path, block reference, or frontmatter field)"
-                   },
-                   "content": {
-                       "type": "string",
-                       "description": "Content to insert"
-                   }
-               },
-               "required": ["filepath", "operation", "target_type", "target", "content"]
-           }
-       )
-
-   def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
-       if not all(k in args for k in ["filepath", "operation", "target_type", "target", "content"]):
-           raise RuntimeError("filepath, operation, target_type, target and content arguments required")
-
-       api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
-       api.patch_content(
-           args.get("filepath", ""),
-           args.get("operation", ""),
-           args.get("target_type", ""),
-           args.get("target", ""),
-           args.get("content", "")
-       )
-
-       return [
-           TextContent(
-               type="text",
-               text=f"Successfully patched content in {args['filepath']}"
-           )
-       ]
-       
-class PutContentToolHandler(ToolHandler):
-   def __init__(self):
-       super().__init__("obsidian_put_content")
-
-   def get_tool_description(self):
-       return Tool(
-           name=self.name,
-           description="Create a new file in your vault or update the content of an existing one in your vault.",
-           inputSchema={
-               "type": "object",
-               "properties": {
-                   "filepath": {
-                       "type": "string",
-                       "description": "Path to the relevant file (relative to your vault root)",
-                       "format": "path"
-                   },
-                   "content": {
-                       "type": "string",
-                       "description": "Content of the file you would like to upload"
-                   }
-               },
-               "required": ["filepath", "content"]
-           }
-       )
-
-   def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
-       if "filepath" not in args or "content" not in args:
-           raise RuntimeError("filepath and content arguments required")
-
-       api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
-       api.put_content(args.get("filepath", ""), args["content"])
-
-       return [
-           TextContent(
-               type="text",
-               text=f"Successfully uploaded content to {args['filepath']}"
-           )
-       ]
-   
-
-class DeleteFileToolHandler(ToolHandler):
-   def __init__(self):
-       super().__init__("obsidian_delete_file")
-
-   def get_tool_description(self):
-       return Tool(
-           name=self.name,
-           description="Delete a file or directory from the vault.",
-           inputSchema={
-               "type": "object",
-               "properties": {
-                   "filepath": {
-                       "type": "string",
-                       "description": "Path to the file or directory to delete (relative to vault root)",
-                       "format": "path"
-                   },
-                   "confirm": {
-                       "type": "boolean",
-                       "description": "Confirmation to delete the file (must be true)",
-                       "default": False
-                   }
-               },
-               "required": ["filepath", "confirm"]
-           }
-       )
-
-   def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
-       if "filepath" not in args:
-           raise RuntimeError("filepath argument missing in arguments")
-       
-       if not args.get("confirm", False):
-           raise RuntimeError("confirm must be set to true to delete a file")
-
-       api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
-       api.delete_file(args["filepath"])
-
-       return [
-           TextContent(
-               type="text",
-               text=f"Successfully deleted {args['filepath']}"
-           )
-       ]
    
 class ComplexSearchToolHandler(ToolHandler):
    def __init__(self):
@@ -424,7 +247,7 @@ class ComplexSearchToolHandler(ToolHandler):
        if "query" not in args:
            raise RuntimeError("query argument missing in arguments")
 
-       api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
+       api = obsidian.Obsidian(api_key=api_key, host=obsidian_host, whitelist=whitelist)
        results = api.search_json(args.get("query", ""))
 
        return [
@@ -463,7 +286,7 @@ class BatchGetFileContentsToolHandler(ToolHandler):
         if "filepaths" not in args:
             raise RuntimeError("filepaths argument missing in arguments")
 
-        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
+        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host, whitelist=whitelist)
         content = api.get_batch_file_contents(args["filepaths"])
 
         return [
@@ -514,7 +337,7 @@ class PeriodicNotesToolHandler(ToolHandler):
         if type not in valid_types:
             raise RuntimeError(f"Invalid type: {type}. Must be one of: {', '.join(valid_types)}")
 
-        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
+        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host, whitelist=whitelist)
         content = api.get_periodic_note(period,type)
 
         return [
@@ -574,7 +397,7 @@ class RecentPeriodicNotesToolHandler(ToolHandler):
         if not isinstance(include_content, bool):
             raise RuntimeError(f"Invalid include_content: {include_content}. Must be a boolean")
 
-        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
+        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host, whitelist=whitelist)
         results = api.get_recent_periodic_notes(period, limit, include_content)
 
         return [
@@ -621,12 +444,38 @@ class RecentChangesToolHandler(ToolHandler):
         if not isinstance(days, int) or days < 1:
             raise RuntimeError(f"Invalid days: {days}. Must be a positive integer")
 
-        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
+        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host, whitelist=whitelist)
         results = api.get_recent_changes(limit, days)
 
         return [
             TextContent(
                 type="text",
                 text=json.dumps(results, indent=2)
+            )
+        ]
+
+class GetAllTagsToolHandler(ToolHandler):
+    def __init__(self):
+        super().__init__("obsidian_get_all_tags")
+
+    def get_tool_description(self):
+        return Tool(
+            name=self.name,
+            description="Get all unique tags used across all notes in the vault.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        )
+
+    def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
+        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host, whitelist=whitelist)
+        tags = api.get_all_tags()
+
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps(tags, indent=2)
             )
         ]
